@@ -1,6 +1,12 @@
+import { IS_DEMO } from '../lib/demo'
+
 const TOKEN_KEY = 'cupula-token'
 
-export const API_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api/v1').replace(/\/$/, '')
+// En la demo la API simulada vive en el mismo origen que la web (/cupula/api/v1): el navegador nunca llama a
+// localhost, que en una web pública dispararía el aviso de acceso a la red local.
+const DEFAULT_API = IS_DEMO ? `${import.meta.env.BASE_URL}api/v1` : 'http://localhost:8000/api/v1'
+
+export const API_URL = (import.meta.env.VITE_API_URL ?? DEFAULT_API).replace(/\/$/, '')
 
 /** Error de la API con el formato de Laravel: { message, errors: { campo: [mensajes] } }. */
 export class ApiError extends Error {
@@ -40,7 +46,7 @@ export const tokenStore = {
 type Query = Record<string, string | number | boolean | undefined | null>
 
 export async function api<T>(path: string, init: { method?: string; body?: unknown; query?: Query } = {}): Promise<T> {
-  const url = new URL(API_URL + path)
+  const url = new URL(API_URL + path, window.location.origin)
   for (const [key, value] of Object.entries(init.query ?? {})) {
     if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value))
   }
