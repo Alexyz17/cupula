@@ -1,0 +1,405 @@
+openapi: 3.1.0
+info:
+  title: Cúpula API
+  version: 1.0.0
+  summary: Reservas de telescopios y equipo para clubs de astronomía.
+  description: |
+    API REST de Cúpula. Autenticación con tokens de Laravel Sanctum en la cabecera `Authorization: Bearer <token>`.
+
+    - Las fechas se envían y se devuelven en ISO 8601. La API guarda y responde en UTC (`2026-11-05T20:00:00Z`) y acepta cualquier zona horaria en la entrada (`2026-11-05T21:00:00+01:00`).
+    - Los errores de validación siguen el formato de Laravel: `{ "message": "...", "errors": { "campo": ["mensaje"] } }`, con mensajes en español.
+    - Reglas del club (configurables en `config/cupula.php`): franjas de 30 minutos, de 30 minutos a 6 horas, hasta 60 días de antelación, máximo 3 reservas activas por socio y sin solapes en un mismo equipo.
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Desarrollo local
+
+tags:
+  - name: Autenticación
+  - name: Equipos
+  - name: Reservas
+
+paths:
+  /auth/register:
+    post:
+      tags: [Autenticación]
+      summary: Crear una cuenta de socio
+      description: El rol siempre es `member`; enviar `role` no tiene efecto. Límite de 10 peticiones por minuto.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, password_confirmation]
+              properties:
+                name: { type: string, maxLength: 80, example: Laura Martín }
+                email: { type: string, format: email, example: laura@example.com }
+                password: { type: string, minLength: 8, description: Al menos una letra y un número., example: estrellas1 }
+                password_confirmation: { type: string, example: estrellas1 }
+      responses:
+        '201': { $ref: '#/components/responses/Token' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/login:
+    post:
+      tags: [Autenticación]
+      summary: Iniciar sesión
+      description: Devuelve el mismo error si el email no existe o la contraseña es incorrecta. Límite de 5 intentos por minuto.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, example: socia@cupula.test }
+                password: { type: string, example: cupula2026 }
+                device_name: { type: string, maxLength: 60, description: Nombre del token. Por defecto `web`. }
+      responses:
+        '200': { $ref: '#/components/responses/Token' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/logout:
+    post:
+      tags: [Autenticación]
+      summary: Cerrar sesión (revoca el token actual)
+      responses:
+        '204': { description: Token revocado }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /me:
+    get:
+      tags: [Autenticación]
+      summary: Usuario conectado
+      responses:
+        '200':
+          description: Usuario
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /equipment:
+    get:
+      tags: [Equipos]
+      summary: Catálogo de equipos
+      description: Público. Ordenado con los telescopios primero. Solo muestra equipos activos, salvo a administradores con `include_inactive=1`.
+      security: [{}, { bearerAuth: [] }]
+      parameters:
+        - { name: type, in: query, schema: { $ref: '#/components/schemas/EquipmentType' } }
+        - { name: include_inactive, in: query, schema: { type: boolean }, description: Solo para administradores. }
+      responses:
+        '200':
+          description: Lista de equipos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Equipment' } }
+    post:
+      tags: [Equipos]
+      summary: Dar de alta un equipo (administración)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EquipmentInput' }
+      responses:
+        '201': { $ref: '#/components/responses/OneEquipment' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /equipment/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Equipos]
+      summary: Ficha de un equipo
+      description: Un equipo inactivo devuelve 404 salvo a administradores.
+      security: [{}, { bearerAuth: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/OneEquipment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Equipos]
+      summary: Editar un equipo (administración)
+      description: Edición parcial. Para retirar un equipo sin perder su historial, envía `is_active=false`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EquipmentInput' }
+      responses:
+        '200': { $ref: '#/components/responses/OneEquipment' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Equipos]
+      summary: Borrar un equipo (administración)
+      responses:
+        '204': { description: Borrado }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Tiene reservas pendientes; hay que desactivarlo o cancelarlas antes.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+
+  /equipment/{id}/availability:
+    get:
+      tags: [Equipos]
+      summary: Franjas ocupadas de un día
+      description: |
+        Público. `date` es un día del calendario del club (Europe/Madrid). Devuelve las reservas confirmadas que tocan ese día,
+        incluidas las que empiezan la noche anterior. No incluye quién reservó.
+      security: [{}, { bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+        - { name: date, in: query, required: true, schema: { type: string, format: date, example: '2026-11-05' } }
+      responses:
+        '200':
+          description: Disponibilidad
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      equipment_id: { type: integer }
+                      date: { type: string, format: date }
+                      timezone: { type: string, example: Europe/Madrid }
+                      slot_minutes: { type: integer, example: 30 }
+                      busy:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            starts_at: { type: string, format: date-time }
+                            ends_at: { type: string, format: date-time }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /reservations:
+    get:
+      tags: [Reservas]
+      summary: Listar reservas
+      description: Por defecto, las del usuario conectado. `scope=all` (todo el club) solo para administradores. Paginado.
+      parameters:
+        - { name: scope, in: query, schema: { type: string, enum: [mine, all], default: mine } }
+        - { name: equipment_id, in: query, schema: { type: integer } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/ReservationStatus' } }
+        - { name: from, in: query, schema: { type: string, format: date-time }, description: Reservas que terminan después de esta fecha. }
+        - { name: to, in: query, schema: { type: string, format: date-time }, description: Reservas que empiezan antes de esta fecha. }
+        - { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 15 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: Página de reservas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Reservation' } }
+                  links: { type: object }
+                  meta: { type: object, properties: { current_page: { type: integer }, last_page: { type: integer }, per_page: { type: integer }, total: { type: integer } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Reservas]
+      summary: Reservar un equipo
+      description: |
+        Las reglas de negocio se comprueban dentro de una transacción que bloquea la fila del equipo, para que dos reservas
+        simultáneas de la misma franja no puedan entrar las dos. Los administradores no tienen límite de reservas activas.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [equipment_id, starts_at, ends_at]
+              properties:
+                equipment_id: { type: integer, example: 1 }
+                starts_at: { type: string, format: date-time, example: '2026-11-05T21:00:00+01:00' }
+                ends_at: { type: string, format: date-time, example: '2026-11-05T23:00:00+01:00' }
+                notes: { type: string, maxLength: 500, example: Júpiter y sus lunas }
+      responses:
+        '201':
+          description: Reserva creada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Reservation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /reservations/{id}:
+    get:
+      tags: [Reservas]
+      summary: Ver una reserva (propia o, para administradores, cualquiera)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200':
+          description: Reserva
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Reservation' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /reservations/{id}/cancel:
+    post:
+      tags: [Reservas]
+      summary: Cancelar una reserva
+      description: La persona que reservó o un administrador. No se puede cancelar una reserva ya empezada ni una ya cancelada.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200':
+          description: Reserva cancelada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Reservation' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Token de Laravel Sanctum devuelto por `/auth/login` o `/auth/register`.
+
+  schemas:
+    EquipmentType:
+      type: string
+      enum: [telescope, mount, camera, binoculars, accessory]
+    ReservationStatus:
+      type: string
+      enum: [confirmed, cancelled]
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [member, admin] }
+    Equipment:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string, example: Dobson 254/1200 }
+        type: { $ref: '#/components/schemas/EquipmentType' }
+        description: { type: [string, 'null'] }
+        aperture_mm: { type: [integer, 'null'], example: 254 }
+        focal_length_mm: { type: [integer, 'null'], example: 1200 }
+        is_active: { type: boolean }
+    EquipmentInput:
+      type: object
+      properties:
+        name: { type: string, maxLength: 120 }
+        type: { $ref: '#/components/schemas/EquipmentType' }
+        description: { type: [string, 'null'], maxLength: 2000 }
+        aperture_mm: { type: [integer, 'null'], minimum: 1 }
+        focal_length_mm: { type: [integer, 'null'], minimum: 1 }
+        is_active: { type: boolean }
+    Reservation:
+      type: object
+      properties:
+        id: { type: integer }
+        equipment: { $ref: '#/components/schemas/Equipment' }
+        user:
+          type: object
+          description: Solo id y nombre; el email de los socios nunca sale en las reservas.
+          properties:
+            id: { type: integer }
+            name: { type: string }
+        starts_at: { type: string, format: date-time, example: '2026-11-05T20:00:00Z' }
+        ends_at: { type: string, format: date-time, example: '2026-11-05T22:00:00Z' }
+        status: { $ref: '#/components/schemas/ReservationStatus' }
+        notes: { type: [string, 'null'] }
+        cancelled_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: [string, 'null'], format: date-time }
+    Message:
+      type: object
+      properties:
+        message: { type: string }
+
+  responses:
+    Token:
+      description: Sesión iniciada
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              token: { type: string, example: '1|abc123…' }
+              user: { $ref: '#/components/schemas/User' }
+    OneEquipment:
+      description: Equipo
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data: { $ref: '#/components/schemas/Equipment' }
+    ValidationError:
+      description: Datos no válidos o regla del club incumplida
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message: { type: string, example: El equipo ya está reservado en esa franja. }
+              errors:
+                type: object
+                additionalProperties: { type: array, items: { type: string } }
+                example: { starts_at: [El equipo ya está reservado en esa franja.] }
+    Unauthenticated:
+      description: Falta el token o no es válido
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Message' }
+          example: { message: Inicia sesión para continuar. }
+    Forbidden:
+      description: Sin permiso
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Message' }
+          example: { message: No tienes permiso para hacer esto. }
+    NotFound:
+      description: No existe
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Message' }
+          example: { message: No encontrado. }
+    TooManyRequests:
+      description: Demasiados intentos
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Message' }
+          example: { message: Demasiados intentos. Espera un momento y vuelve a probar. }

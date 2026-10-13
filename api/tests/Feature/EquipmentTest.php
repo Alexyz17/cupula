@@ -100,3 +100,13 @@ it('borra un equipo sin reservas pendientes', function () {
 
     $this->assertModelMissing($equipment);
 });
+
+it('muestra primero los telescopios y después el resto por tipo y nombre', function () {
+    Equipment::factory()->create(['type' => 'accessory', 'name' => 'Filtro solar']);
+    Equipment::factory()->create(['type' => 'camera', 'name' => 'Cámara planetaria']);
+    Equipment::factory()->create(['type' => 'telescope', 'name' => 'Refractor 80']);
+    Equipment::factory()->create(['type' => 'telescope', 'name' => 'Dobson 254']);
+
+    expect($this->getJson('/api/v1/equipment')->json('data.*.name'))
+        ->toBe(['Dobson 254', 'Refractor 80', 'Cámara planetaria', 'Filtro solar']);
+});

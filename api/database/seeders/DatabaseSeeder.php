@@ -50,7 +50,7 @@ class DatabaseSeeder extends Seeder
 
         // Unas cuantas noches ya reservadas a partir de mañana (21:00 en Madrid).
         $tz = config('cupula.timezone');
-        $nights = [[1, 0, $member], [1, 0, $others[0]], [2, 2, $others[1]], [3, 0, $others[2]], [5, 3, $member], [6, 1, $admin]];
+        $nights = [[1, 0, $member], [1, 1, $others[0]], [2, 2, $others[1]], [3, 0, $others[2]], [5, 3, $member], [6, 1, $admin]];
 
         foreach ($nights as [$day, $equipmentIndex, $user]) {
             $start = now($tz)->addDays($day)->setTime(21, 0)->utc();

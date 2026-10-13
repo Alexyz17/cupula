@@ -25,7 +25,8 @@ class EquipmentController extends Controller
         $equipment = Equipment::query()
             ->when(! ($isAdmin && $request->boolean('include_inactive')), fn ($q) => $q->active())
             ->when($request->query('type'), fn ($q, $type) => $q->where('type', $type))
-            ->orderBy('type')
+            // Telescopios primero: es lo que más se busca.
+            ->orderByRaw("case type when 'telescope' then 1 when 'mount' then 2 when 'camera' then 3 when 'binoculars' then 4 else 5 end")
             ->orderBy('name')
             ->get();
 
